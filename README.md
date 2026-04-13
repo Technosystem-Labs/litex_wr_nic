@@ -44,6 +44,14 @@ features with support for PCIe Precision Time Measurement (PTM). The design enab
 - **LiteX Acorn Baseboard:** Features a larger FPGA (XC7A200T) for easier debugging. Future plans
     aim to add digital VCXO functionality for full White Rabbit support.
 
+- **Sinara Kasli v2.0:** Features a Xilinx Artix-7 (XC7A100T) FPGA with two Si549 DCXOs for clock
+    tuning. The Main Si549 is disciplined by the WR SoftPLL via I2C ADPLL writes and its output is
+    passed through the on-board Si5324 CDR before reaching the GTP reference clock input. The Helper
+    Si549 provides the DDMTD helper clock directly to the FPGA fabric. SFP access is routed through
+    two cascaded PCA9548 I2C muxes (addresses 0x70/0x71) on the shared board I2C bus. No PCIe — the
+    design is a standalone WR node with a serial console accessible via the physical UART or via
+    JTAGBone (crossover UART).
+
 This open-source project is modular and developer-friendly, making it suitable for applications
 requiring precise timing and basic networking functionality.
 
@@ -185,13 +193,33 @@ synchronization across devices.
 [> Build and test designs
 -------------------------
 
-The FPGA design can be build and tested with the following commands:
+The FPGA design can be build and tested with the following commands.
 
+**SPEC-A7:**
 ```sh
 $ ./spec_a7_wr_nic.py --build --load
 ```
 
-The WR console/gui should then be available on `/dev/ttyUSB2`:
+**Kasli v2.0:**
+```sh
+$ ./kasli_v2_wr_nic.py --build --load
+```
+
+The `--sfp-connector` argument (0–3, default 0) selects which SFP port is used for the White Rabbit link.
+
+Flash the bitstream and SDB filesystem to SPI flash:
+```sh
+$ ./kasli_v2_wr_nic.py --flash
+```
+
+The WR console/gui should then be available on the board's serial port (115200 baud). It is also
+accessible via JTAGBone crossover UART without occupying the physical serial port:
+```sh
+$ litex_server --jtag --jtag-config=openocd_xc7_ft4232.cfg
+$ litex_term crossover
+```
+
+The WR console/gui should then be available on `/dev/ttyUSB2` for SPEC-A7:
 
 ```
 wrc# gui
@@ -262,8 +290,10 @@ To rebuild the firmware, use the following commands:
 
 ```sh
 cd litex_wr_nic/firmware
-./build.py
+./build.py --target <target>
 ```
+
+Available targets: `spec_a7` (default), `acorn`, `kasli_v2`.
 
 The build.py script compiles the firmware using a specific RISC-V toolchain as recommended in the WRPC User Manual ([Section 2.2]
 (https://ohwr.org/project/wr-cores/wikis/uploads/7cf8d2161b6e5fa86348455bbd022196/wrpc-user-manual-v5.0.pdf)).

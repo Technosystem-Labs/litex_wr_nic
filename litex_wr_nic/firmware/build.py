@@ -25,6 +25,15 @@ REPO_URL          = "https://gitlab.com/ohwr/project/wrpc-sw.git"
 CLONE_DIR         = "wrpc-sw"
 
 COMMIT_HASH       = "baf7749610b2880bf243b38a9a1608af8e0e688d"
+
+# Per-target configuration (config file, firmware output name).
+TARGET_CONFIG = {
+    "spec_a7"  : ("spec_a7_defconfig",   "spec_a7_wrc.bram"),
+    "acorn"    : ("spec_a7_defconfig",   "spec_a7_wrc.bram"),
+    "kasli_v2" : ("kasli_v2_defconfig",  "kasli_v2_wrc.bram"),
+}
+
+# Legacy defaults (used when CONFIG_SRC / FIRMWARE_DEST are referenced directly).
 CONFIG_SRC        = "spec_a7_defconfig"
 
 FIRMWARE_SRC      = os.path.join(CLONE_DIR, "wrc.bram")
@@ -73,30 +82,43 @@ def checkout_commit(target="spec_a7"):
     run_command(f"git checkout softpll/spll_main.c", cwd=CLONE_DIR)
     run_command(f"git checkout {COMMIT_HASH}", cwd=CLONE_DIR)
 
-    # For Acorn: adapts kp/ki.
-    if target != "spec_a7":
+    # For Acorn / Kasli v2.0: adapt SoftPLL kp/ki for Si549 / MMCM phase-shift
+    # characteristics.  The Si549 ADPLL has much lower gain than the VCXO+DAC
+    # combo on SPEC-A7, so the loop filter gains must be reduced accordingly.
+    # Exact values require lab tuning; Acorn values are a reasonable starting
+    # point for Kasli v2.0 as well.
+    if target in ("acorn", "kasli_v2"):
         tools.replace_in_file(f"{CLONE_DIR}/softpll/spll_main.c", "s->pi.kp = -1100;", "s->pi.kp = -150;")
         tools.replace_in_file(f"{CLONE_DIR}/softpll/spll_main.c", "s->pi.ki = -30;", "s->pi.ki = -2;")
 
-def copy_config_file():
-    """Copy the configuration file to the repository."""
-    config_dest = os.path.join(CLONE_DIR, "configs/spec_a7_defconfig")
-    if not os.path.exists(CONFIG_SRC):
-        print(f"Error: Configuration file {CONFIG_SRC} does not exist.")
-        exit(1)
-    shutil.copy(CONFIG_SRC, config_dest)
+    # For Kasli v2.0: overlay the generic board.c with the Kasli-specific
+    # version that initialises the PCA9548 I2C muxes for SFP0 access.
+    if target == "kasli_v2":
+        board_overlay = os.path.join(os.path.dirname(__file__), "boards", "kasli_wr", "board.c")
+        board_dest    = os.path.join(CLONE_DIR, "boards", "generic", "board.c")
+        shutil.copy(board_overlay, board_dest)
 
-def build_firmware():
+def copy_config_file(config_src):
+    """Copy the configuration file to the repository."""
+    config_name = os.path.basename(config_src)
+    config_dest = os.path.join(CLONE_DIR, f"configs/{config_name}")
+    if not os.path.exists(config_src):
+        print(f"Error: Configuration file {config_src} does not exist.")
+        exit(1)
+    shutil.copy(config_src, config_dest)
+
+def build_firmware(config_src):
     """Build the firmware."""
-    run_command("make spec_a7_defconfig", cwd=CLONE_DIR)
+    config_name = os.path.basename(config_src)
+    run_command(f"make {config_name}", cwd=CLONE_DIR)
     run_command("make", cwd=CLONE_DIR)
 
-def copy_firmware():
+def copy_firmware(firmware_dest):
     """Copy the resulting firmware to the destination."""
     if not os.path.exists(FIRMWARE_SRC):
         print(f"Error: Firmware file {FIRMWARE_SRC} does not exist.")
         exit(1)
-    shutil.copy(FIRMWARE_SRC, FIRMWARE_DEST)
+    shutil.copy(FIRMWARE_SRC, firmware_dest)
 
 def build_sdbfs():
     """Build the SDB filesystem."""
@@ -118,17 +140,19 @@ def build_sdbfs():
 # Main ---------------------------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="LiteX-WR-NIC on Acorn Baseboard Mini.")
-    parser.add_argument("--target", default="spec_a7", help="Target Board.", choices=["spec_a7", "acorn"])
+    parser = argparse.ArgumentParser(description="LiteX-WR-NIC firmware builder.")
+    parser.add_argument("--target", default="spec_a7", help="Target Board.", choices=list(TARGET_CONFIG.keys()))
     args = parser.parse_args()
+
+    config_src, firmware_dest = TARGET_CONFIG[args.target]
 
     init_riscv_toolchain()
     check_riscv_toolchain()
     clone_repository()
     checkout_commit(args.target)
-    copy_config_file()
-    build_firmware()
-    copy_firmware()
+    copy_config_file(config_src)
+    build_firmware(config_src)
+    copy_firmware(firmware_dest)
     build_sdbfs()
     print("Build process completed successfully.")
 
