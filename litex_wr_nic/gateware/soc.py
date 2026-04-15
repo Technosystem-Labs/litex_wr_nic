@@ -198,7 +198,7 @@ class LiteXWRNICSoC(SoCMini):
             p_g_dpram_size                = 131072//4,
             p_txpolarity                  = sfp_tx_polarity,
             p_rxpolarity                  = sfp_rx_polarity,
-            p_g_with_external_clock_input = str(with_ext_clk).upper(),
+            p_g_with_external_clock_input = int(with_ext_clk),  # probably wrong interpretation of values at the crossing between Python and VHDL
             p_g_fpga_family               = {True: "artix7", False: "kintex7"}[self.platform.device.startswith("xc7a")],
             p_g_board_name                = board_name,
             p_g_dac_bits                  = dac_bits,

@@ -64,23 +64,23 @@ class _CRG(LiteXModule):
         self.cd_sys           = ClockDomain()
         self.cd_refclk_pcie   = ClockDomain()  # Dummy QPLL0 refclk (PCIe absent)
         self.cd_refclk_eth    = ClockDomain()  # WR GTP refclk (CDR clean, tunable)
-        self.cd_clk_125m_gtp  = ClockDomain()  # WR GTP refclk (same signal)
+        self.cd_clk_125m_gtp  = ClockDomain()  # WR GTP refclk (same signal), required by the LiteXWRNICSoC
         self.cd_clk_62m5_dmtd = ClockDomain()  # DDMTD helper clock (Helper Si549)
-        self.cd_clk10m_in     = ClockDomain()  # 10MHz ext ref (unused, tied to 0)
-        self.cd_clk62m5_in    = ClockDomain()  # 62.5MHz ext ref (unused, tied to 0)
+        self.cd_clk10m_in     = ClockDomain()  # 10MHz ext ref (unused, tied to 0), needed to satisfy LiteXWRNICSoC
 
         # # #
 
         # Sys PLL: free-running from clk125_gtp (F10/E10, fixed 125MHz oscillator).
         # IBUFDS_GTE2 ODIV2 gives 62.5MHz to the PLL.
         clk125_gtp   = platform.request("clk125_gtp")
-        clk125_buf   = Signal()
+        platform.add_period_constraint(clk125_gtp.p, 1e9/125e6)
+
+        # Only one of the IBUFDS_GTE2’s O or ODIV2 outputs can be routed to the FPGA logic
         clk125_div2  = Signal()
         self.specials += Instance("IBUFDS_GTE2",
             i_CEB   = 0,
             i_I     = clk125_gtp.p,
             i_IB    = clk125_gtp.n,
-            o_O     = clk125_buf,
             o_ODIV2 = clk125_div2,
         )
         self.pll = pll = S7PLL(speedgrade=-3)
@@ -91,6 +91,8 @@ class _CRG(LiteXModule):
         # WR GTP reference clock: CDR-cleaned Main Si549 output (F6/E6, 125MHz).
         # This clock is disciplined to the WR master by the SoftPLL + Main Si549.
         cdr_clk_clean = platform.request("cdr_clk_clean")
+        platform.add_period_constraint(cdr_clk_clean.p, 1e9/125e6)
+
         cdr_clk_se    = Signal()
         self.specials += Instance("IBUFDS_GTE2",
             i_CEB = 0,
@@ -101,11 +103,12 @@ class _CRG(LiteXModule):
         self.comb += [
             self.cd_clk_125m_gtp.clk.eq(cdr_clk_se),
             self.cd_refclk_eth.clk.eq(cdr_clk_se),
-            # Drive QPLL0 (PCIe dummy) with the same CDR clock.
-            # QPLL0 may not lock at correct PCIe frequency, but WR uses QPLL1 only.
-            self.cd_refclk_pcie.clk.eq(cdr_clk_se),
+            # We're not allowed to drive the PCIe dummy clock from the cdr_clk_se,
+            # as this would effectively mean that we want to drive both GTREFCLK0
+            # and GTREFCLK1 from the same MGTREFPins - and with current QPLL settings
+            # it causes clock fanout error:
+            # ERROR: [DRC RTSTAT-2] Partially routed nets: 1 net(s) are partially routed. The problem bus(es) and/or net(s) are clk_125m_gtp_clk.
         ]
-        platform.add_period_constraint(cdr_clk_clean.p, 1e9/125e6)
 
         # DDMTD helper clock: direct output of Helper Si549 (W19/W20, ~62.5MHz).
         helper_clk_pads = platform.request("ddmtd_helper_clk")
@@ -146,7 +149,10 @@ class BaseSoC(LiteXWRNICSoC):
             eth_refclk_freq     = 125e6,
             eth_refclk_from_pll = False,  # Use IBUFDS_GTE2 directly (cd_refclk_eth)
         )
-        self.qpll.enable_pll_refclk()
+        # downgrades Vivado DRC check REQP-49 from error to warning,
+        # allowing a PLL-generated clock to drive QPLL refclk input, but we use 
+        # cd_refclk_eth directly, so it should be safe to skip this.
+        # self.qpll.enable_pll_refclk()
 
         # SoCMini ----------------------------------------------------------------------------------
 

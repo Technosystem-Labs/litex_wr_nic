@@ -272,8 +272,7 @@ class Si549DAC(LiteXModule):
             description="Set to 1 to override DAC input with _force_adpll value.")
         self._force_adpll = CSRStorage(24,
             description="ADPLL value sent when _force=1.")
-        self._force_stb   = CSR(
-            description="Write 1 to trigger a forced ADPLL write.")
+        self._force_stb   = CSR() # Shouldn't we ise CSRStorage(pulse=True, description="Write 1 to trigger a forced ADPLL write.") ?
 
         # CSR: Status.
         self._busy  = CSRStatus(description="1 while an I2C transaction is in progress.")
