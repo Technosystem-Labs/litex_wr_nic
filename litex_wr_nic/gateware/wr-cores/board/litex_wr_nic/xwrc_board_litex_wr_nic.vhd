@@ -78,7 +78,11 @@ entity xwrc_board_litex_wr_nic is
     txpolarity                  : bit                  := '0';
     -- GTPE2_CHANNEL RX Polarity Control Ports
     rxpolarity                  : bit                  := '1';
-    g_dac_bits                  : integer              := 16
+    g_dac_bits                  : integer              := 16;
+    -- Set to FALSE to instantiate your own PLLs (PLL setup 3 in the WRPC
+    -- manual). When FALSE, clk_62m5_sys_i, clk_sys_locked_i and
+    -- clk_dmtd_locked_i must be driven by the top-level.
+    g_use_default_plls          : boolean              := TRUE
     );
   port (
     ---------------------------------------------------------------------------
@@ -92,6 +96,12 @@ entity xwrc_board_litex_wr_nic is
     -- Clock inputs from the board
     clk_62m5_dmtd_i     : in  std_logic;
     clk_125m_gtp_i      : in  std_logic;
+    -- Custom PLL inputs (used when g_use_default_plls = FALSE).
+    -- clk_62m5_sys_i: 62.5 MHz WRPC system clock (must be present from boot).
+    -- clk_sys_locked_i / clk_dmtd_locked_i: lock-status of user-provided PLLs.
+    clk_62m5_sys_i      : in  std_logic                               := '0';
+    clk_sys_locked_i    : in  std_logic                               := '1';
+    clk_dmtd_locked_i   : in  std_logic                               := '1';
     -- 10MHz ext ref clock input (g_with_external_clock_input = TRUE)
     clk_10m_ext_i       : in  std_logic                               := '0';
     -- External PPS input (g_with_external_clock_input = TRUE)
@@ -306,7 +316,7 @@ begin  -- architecture struct
       g_fpga_family               => g_fpga_family,
       g_direct_dmtd               => TRUE,
       g_with_external_clock_input => g_with_external_clock_input,
-      g_use_default_plls          => TRUE,
+      g_use_default_plls          => g_use_default_plls,
       g_simulation                => 0,
       g_input_clk_single          => TRUE,
       g_gtp_enable_pll0           => '0',
@@ -317,6 +327,9 @@ begin  -- architecture struct
       areset_n_i            => areset_n_i,
       clk_10m_ext_i         => clk_10m_ext_i,
       clk_62m5_dmtd_i       => clk_62m5_dmtd_i,
+      clk_62m5_sys_i        => clk_62m5_sys_i,
+      clk_sys_locked_i      => clk_sys_locked_i,
+      clk_dmtd_locked_i     => clk_dmtd_locked_i,
       clk_125m_gtp_p_i      => clk_125m_gtp_i,
       clk_125m_gtp_n_i      => '0', --clk_125m_gtp_n_i,
       sfp_txn_o             => sfp_txn_o,
@@ -343,7 +356,13 @@ begin  -- architecture struct
       GT0_EXT_QPLL_LOCK     => GT0_EXT_QPLL_LOCK
     );
 
-  clk_62m5_sys_o <= clk_ref_62m5;
+  -- Export the actual WRPC sys clock (clk_sys_i domain). Previously this
+  -- exported clk_ref_62m5, which happened to be a related clock on SPEC-A7
+  -- (both MMCM-derived from the same AD9516 refclk) but is a different,
+  -- unrelated 62.5 MHz source in PLL setup 3 (e.g. Kasli v2). Using
+  -- clk_pll_62m5 is the semantically-correct "62m5 sys" output and keeps the
+  -- external WB-slave / WRF CDC in the same domain the WRPC core uses.
+  clk_62m5_sys_o <= clk_pll_62m5;
   rst_62m5_sys_o <= not pll_locked;
 
   -----------------------------------------------------------------------------

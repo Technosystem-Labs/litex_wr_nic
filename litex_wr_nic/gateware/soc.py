@@ -111,7 +111,16 @@ class LiteXWRNICSoC(SoCMini):
         wb_slave_origin = 0x2000_0000,
         wb_slave_size   = 0x0100_0000,
 
-        dac_bits      = 16
+        dac_bits      = 16,
+
+        # PLL setup selection.
+        # True  -> PLL setup 1 (platform-internal MMCM, input clk_125m_gtp_i).
+        # False -> PLL setup 3: caller must provide a 62.5 MHz WRPC sys clock
+        #          in the "clk_62m5_sys" clock domain plus sys_locked and
+        #          dmtd_locked signals (see use_default_plls kwarg below).
+        use_default_plls = True,
+        sys_locked       = None,   # used only when use_default_plls=False
+        dmtd_locked      = None,   # used only when use_default_plls=False
     ):
 
         # Clks.
@@ -192,6 +201,20 @@ class LiteXWRNICSoC(SoCMini):
 
         # White Rabbit Core Instance.
         # ---------------------------
+        # PLL-setup-3 wiring.
+        if use_default_plls:
+            custom_pll_params = {}
+            custom_pll_ports  = {}
+        else:
+            if sys_locked is None or dmtd_locked is None:
+                raise ValueError("use_default_plls=False requires sys_locked and dmtd_locked signals.")
+            custom_pll_params = {"p_g_use_default_plls": 0}
+            custom_pll_ports  = {
+                "i_clk_62m5_sys_i"    : ClockSignal("clk_62m5_sys"),
+                "i_clk_sys_locked_i"  : sys_locked,
+                "i_clk_dmtd_locked_i" : dmtd_locked,
+            }
+
         self.specials += Instance("xwrc_board_litex_wr_nic_wrapper",
             # Parameters.
             p_g_dpram_initf               = os.path.abspath(cpu_firmware),
@@ -202,6 +225,7 @@ class LiteXWRNICSoC(SoCMini):
             p_g_fpga_family               = {True: "artix7", False: "kintex7"}[self.platform.device.startswith("xc7a")],
             p_g_board_name                = board_name,
             p_g_dac_bits                  = dac_bits,
+            **custom_pll_params,
 
             # Clocks/resets.
             i_areset_n_i          = ~ResetSignal("sys"),
@@ -210,6 +234,7 @@ class LiteXWRNICSoC(SoCMini):
             i_clk_10m_ext_i       = ClockSignal("clk10m_in"),
             o_clk_62m5_sys_o      = ClockSignal("wr"),
             o_rst_62m5_sys_o      = ResetSignal("wr"),
+            **custom_pll_ports,
 
             # DAC RefClk Interface.
             o_dac_refclk_load     = self.dac_refclk_load,

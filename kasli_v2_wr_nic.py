@@ -62,6 +62,7 @@ class _CRG(LiteXModule):
 
         # Clock domains.
         self.cd_sys           = ClockDomain()
+        self.cd_clk_62m5_sys  = ClockDomain()  # WRPC clk_sys_i (PLL setup 3). Free-XO derived, valid from boot.
         self.cd_refclk_pcie   = ClockDomain()  # Dummy QPLL0 refclk (PCIe absent)
         self.cd_refclk_eth    = ClockDomain()  # WR GTP refclk (CDR clean, tunable)
         self.cd_clk_125m_gtp  = ClockDomain()  # WR GTP refclk (same signal), required by the LiteXWRNICSoC
@@ -87,6 +88,10 @@ class _CRG(LiteXModule):
         self.comb += pll.reset.eq(self.rst)
         pll.register_clkin(clk125_div2, 62.5e6)
         pll.create_clkout(self.cd_sys, sys_clk_freq, margin=0)
+        # 62.5 MHz WRPC system clock (PLL setup 3). Derived from the free-running
+        # 125 MHz XO so it is valid at power-up — WRPC CPU boots on this clock
+        # and then programs the Main / Helper Si549s over I2C.
+        pll.create_clkout(self.cd_clk_62m5_sys, 62.5e6, margin=0)
 
         # WR GTP reference clock: CDR-cleaned Main Si549 output (F6/E6, 125MHz).
         # This clock is disciplined to the WR master by the SoftPLL + Main Si549.
@@ -100,14 +105,13 @@ class _CRG(LiteXModule):
             i_IB  = cdr_clk_clean.n,
             o_O   = cdr_clk_se,
         )
+        # GTP reference = disciplined Main Si549 (F6/E6). This clock is absent
+        # at power-up, which is fine with PLL setup 3 because the WRPC CPU runs
+        # on cd_clk_62m5_sys (free-XO derived) and programs the Si549 over I2C
+        # before anything downstream of the GTP is needed.
         self.comb += [
             self.cd_clk_125m_gtp.clk.eq(cdr_clk_se),
             self.cd_refclk_eth.clk.eq(cdr_clk_se),
-            # We're not allowed to drive the PCIe dummy clock from the cdr_clk_se,
-            # as this would effectively mean that we want to drive both GTREFCLK0
-            # and GTREFCLK1 from the same MGTREFPins - and with current QPLL settings
-            # it causes clock fanout error:
-            # ERROR: [DRC RTSTAT-2] Partially routed nets: 1 net(s) are partially routed. The problem bus(es) and/or net(s) are clk_125m_gtp_clk.
         ]
 
         # DDMTD helper clock: direct output of Helper Si549 (W19/W20, ~62.5MHz).
@@ -139,6 +143,10 @@ class BaseSoC(LiteXWRNICSoC):
         # Clocking ---------------------------------------------------------------------------------
 
         self.crg = _CRG(platform, sys_clk_freq)
+        cnt = Signal(26)
+        self.sync += cnt.eq(cnt + 1)
+
+        self.comb += platform.request("error_led").eq(cnt[25])  # with 8ns gives ~500 ms period
 
         # Shared QPLL.
         # with_pcie=True is required so that the Ethernet/WR channel maps to QPLL1,
@@ -208,14 +216,23 @@ class BaseSoC(LiteXWRNICSoC):
                 flash_pads       = platform.request("flash", 0),
 
                 # No 1-Wire temperature sensor on Kasli v2.0 WR NIC.
+
+                # PLL setup 3: bypass the platform-internal MMCM and feed
+                # WRPC's clk_sys_i from the free-running 125 MHz XO via
+                # cd_clk_62m5_sys. Helper Si549 still feeds clk_62m5_dmtd_i;
+                # its factory-default NVM frequency is sufficient to get
+                # gc_reset / DDMTD ticking before the CPU reprograms it.
+                use_default_plls = False,
+                sys_locked       = self.crg.pll.locked,
+                dmtd_locked      = 1,  # Helper Si549 has no lock output
             )
             self.add_sources()
 
             # Si549 DAC Bridges.
             # ------------------
             # RefClk DAC: translates WRPC SoftPLL DPLL output to ADPLL writes on
-            # the Main Si549. The Main Si549 output goes through Si5324 CDR and
-            # then to the GTP reference clock (F6/E6, Y18/Y19).
+            # the Main Si549. The Main Si549 output goes through ADCLK948 clk fanout
+            # and then to the GTP reference clock MGTREFCLK0 (F6/E6, Y18/Y19).
             self.refclk_dac = Si549DAC(
                 pads          = platform.request("ddmtd_main_dcxo_i2c"),
                 load          = self.dac_refclk_load,
@@ -257,6 +274,7 @@ class BaseSoC(LiteXWRNICSoC):
 
         asynchronous_clk_domains = [
             self.crg.cd_sys.clk,
+            self.crg.cd_clk_62m5_sys.clk,
             self.crg.cd_clk_62m5_dmtd.clk,
             self.crg.cd_clk_125m_gtp.clk,
             "wr_txoutclk",
@@ -271,7 +289,10 @@ class BaseSoC(LiteXWRNICSoC):
             "clk1" : ClockSignal("clk_62m5_dmtd"),
             "clk2" : ClockSignal("clk_125m_gtp"),
         })
-
+        # To overcome spi x2
+        platform.toolchain.bitstream_commands.append(                                                                                                                                                                                                                                           
+            "set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 1 [current_design]"
+        )   
 # Build --------------------------------------------------------------------------------------------
 
 def main():
@@ -314,10 +335,17 @@ def main():
     builder = Builder(soc, csr_csv="test/csr.csv")
     builder.build(run=args.build)
 
+    # Generate Bitstream.
+    if args.load or args.flash:
+        os.system("python3 litex_wr_nic/gateware/xilinx-bitstream.py {bit_file} {bin_file}".format(
+            bit_file = builder.get_bitstream_filename(mode="sram"),
+            bin_file = builder.get_bitstream_filename(mode="flash"),
+        ))
+
     # Load FPGA.
     if args.load:
         prog = soc.platform.create_programmer()
-        prog.load_bitstream(builder.get_bitstream_filename(mode="sram"))
+        prog.load_bitstream(builder.get_bitstream_filename(mode="flash"))
 
     # Flash FPGA.
     if args.flash:

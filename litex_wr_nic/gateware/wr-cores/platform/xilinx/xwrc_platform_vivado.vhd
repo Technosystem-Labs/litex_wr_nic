@@ -773,11 +773,16 @@ begin  -- architecture rtl
     input_single: if (g_input_clk_single = TRUE) generate
         clk_125m_gtp_buf <= clk_125m_gtp_p_i;
     end generate input_single;
-    -- System PLL input clock buffer
-    cmp_clk_sys_buf_i : BUFG
-      port map (
-        I => clk_125m_gtp_buf,
-        O => clk_125m_pllref_buf);
+    -- System PLL input clock buffer.
+    -- Only instantiated when the platform-internal PLLs are used. With
+    -- g_use_default_plls = FALSE, clk_125m_pllref_buf is driven directly
+    -- from clk_125m_ref_i in gen_custom_plls above.
+    gen_pllref_buf : if (g_use_default_plls = TRUE) generate
+      cmp_clk_sys_buf_i : BUFG
+        port map (
+          I => clk_125m_gtp_buf,
+          O => clk_125m_pllref_buf);
+    end generate gen_pllref_buf;
 
     cmp_gtp: entity work.wr_gtp_phy_family7
       generic map(

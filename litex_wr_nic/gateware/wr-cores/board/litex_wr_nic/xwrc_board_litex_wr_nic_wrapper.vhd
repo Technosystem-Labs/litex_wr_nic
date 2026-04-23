@@ -49,7 +49,9 @@ entity xwrc_board_litex_wr_nic_wrapper is
     -- GTPE2_CHANNEL TX Polarity Control Ports
     txpolarity                  : bit := '0';
     -- GTPE2_CHANNEL RX Polarity Control Ports
-    rxpolarity                  : bit := '1'
+    rxpolarity                  : bit := '1';
+    -- Set to FALSE to instantiate custom PLLs (PLL setup 3).
+    g_use_default_plls          : boolean := TRUE
   );
   port (
     -- Clocks/resets
@@ -57,6 +59,10 @@ entity xwrc_board_litex_wr_nic_wrapper is
     areset_edge_n_i      : in  std_logic := '1';
     clk_62m5_dmtd_i      : in  std_logic;
     clk_125m_gtp_i       : in  std_logic;
+    -- Custom PLL inputs (used when g_use_default_plls = FALSE).
+    clk_62m5_sys_i       : in  std_logic := '0';
+    clk_sys_locked_i     : in  std_logic := '1';
+    clk_dmtd_locked_i    : in  std_logic := '1';
     clk_10m_ext_i        : in  std_logic := '0';
     pps_ext_i            : in  std_logic := '0';
     clk_62m5_sys_o       : out std_logic;
@@ -250,13 +256,17 @@ begin
       g_diag_ro_size              => g_diag_ro_size,
       g_diag_rw_size              => g_diag_rw_size,
       txpolarity                  => txpolarity,
-      rxpolarity                  => rxpolarity
+      rxpolarity                  => rxpolarity,
+      g_use_default_plls          => g_use_default_plls
     )
     port map (
       areset_n_i           => areset_n_i,
       areset_edge_n_i      => areset_edge_n_i,
       clk_62m5_dmtd_i      => clk_62m5_dmtd_i,
       clk_125m_gtp_i       => clk_125m_gtp_i,
+      clk_62m5_sys_i       => clk_62m5_sys_i,
+      clk_sys_locked_i     => clk_sys_locked_i,
+      clk_dmtd_locked_i    => clk_dmtd_locked_i,
       clk_10m_ext_i        => clk_10m_ext_i,
       pps_ext_i            => pps_ext_i,
       clk_62m5_sys_o       => clk_62m5_sys_o,

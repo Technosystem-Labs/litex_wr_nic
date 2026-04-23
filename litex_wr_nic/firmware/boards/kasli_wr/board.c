@@ -55,26 +55,166 @@ static int kasli_i2c_mux_write(uint8_t addr, uint8_t value)
 	ack |= bb_i2c_put_byte(&dev_i2c_sfp1, value);
 	bb_i2c_stop(&dev_i2c_sfp1);
 
-	return ack ? 0 : -1;
+	return ack == 0 ? 0 : -1;
 }
 
-int wrc_board_early_init(void)
+static int kasli_i2c_write(uint8_t addr, uint8_t reg, uint8_t val)
 {
-	generic_board_storage_init();
+	int ack;
 
+	bb_i2c_init(&dev_i2c_sfp1);
+	bb_i2c_start(&dev_i2c_sfp1);
+	ack  = bb_i2c_put_byte(&dev_i2c_sfp1, addr << 1); /* dev addr + write */
+	ack |= bb_i2c_put_byte(&dev_i2c_sfp1, reg);
+	ack |= bb_i2c_put_byte(&dev_i2c_sfp1, val);
+	bb_i2c_stop(&dev_i2c_sfp1);
+
+	return ack == 0 ? 0 : -1;
+}
+
+static int enable_i2c_switch_port(uint8_t switch_adr, uint8_t port_no)
+{
+	if (port_no > 7) {
+		board_dbg("Kasli: port_no must be in smaller than 8, not: %d\n", port_no);
+		return -1;
+	}
+
+	return kasli_i2c_mux_write(switch_adr, 1 << port_no);
+}
+
+static int release_i2c_switch(uint8_t switch_adr)
+{
+	return kasli_i2c_mux_write(switch_adr,  0x00);
+}
+
+static int setup_i2c_switches(void)
+{
 	/*
 	 * Configure PCA9548 I2C muxes for SFP0 access:
 	 *   1. Disable all channels on 0x70 (prevents bus contention).
 	 *   2. Enable channel 0 on 0x71 (routes to SFP0 EEPROM).
 	 * Leave both muxes in this state permanently.
 	 */
-	if (kasli_i2c_mux_write(KASLI_I2C_MUX_TOP_ADDR, 0x00) < 0)
-		board_dbg("Kasli: failed to configure I2C mux 0x%02x\n",
-			  KASLI_I2C_MUX_TOP_ADDR);
+	int ret = kasli_i2c_mux_write(KASLI_I2C_MUX_TOP_ADDR, 0x00);
+	if ( ret < 0 ) 
+		board_dbg("Kasli: failed to configure I2C mux 0x%02x; return code %d\n",
+			  KASLI_I2C_MUX_TOP_ADDR, ret);
 
-	if (kasli_i2c_mux_write(KASLI_I2C_MUX_SFP_ADDR, 0x01) < 0)
-		board_dbg("Kasli: failed to configure I2C mux 0x%02x\n",
-			  KASLI_I2C_MUX_SFP_ADDR);
+	ret = kasli_i2c_mux_write(KASLI_I2C_MUX_SFP_ADDR, 0x01);
+	if ( ret < 0 )
+		board_dbg("Kasli: failed to configure I2C mux 0x%02x; return code %d\n",
+			  KASLI_I2C_MUX_SFP_ADDR, ret);
+
+	return 0;
+}
+
+
+static int detect_expander(void)
+{
+	// PCA9539 (IC28/IC29)  -> 0x75/0x74
+	// MCP23017 (IC24/IC25) -> 0x21/0x20
+
+	/* 
+	* NOTE: silent assumption that if one GPIO expander is reachable, the second
+	*	one should be reachable, as well. It's pretty sensible assumption.
+	*	At the moment, we are interested only in SFP0, so we actually care only
+	* 	about the 0x20/0x74 ICs.
+	*/
+	
+	release_i2c_switch(KASLI_I2C_MUX_SFP_ADDR);
+	if(enable_i2c_switch_port(KASLI_I2C_MUX_SFP_ADDR, 3) < 0)
+		return -1;
+
+	int variant = -1;
+	
+	if (bb_i2c_devprobe(&dev_i2c_sfp1, 0x20)){
+		variant = 0;	/* MCP23017 variant */
+		board_dbg("Kasli: found MCP23017 GPIO expander at 0x20\n");
+	} else if (bb_i2c_devprobe(&dev_i2c_sfp1, 0x74)) {
+		variant = 1;	/* PCA9539 variant */
+		board_dbg("Kasli: found PCA9539 GPIO expander at 0x20\n");
+	} else {
+		board_dbg("Kasli: no GPIO expander detected at 0x20 or 0x74\n");
+	}
+
+	release_i2c_switch(KASLI_I2C_MUX_SFP_ADDR);
+	return variant;
+}
+
+static int configure_gpio_expander(int variant){
+	// Silent assumption that if one GPIO expander was detected, the second one
+	// is present and reachable as well. It's pretty sensible assumption.
+	
+	// We should not need to drive Helper and Main DCXO OE, because they are actively
+	// pulled up by resistors, but we need to actively drive CLK_SEL LOW, to use
+	// clock signal from main DCXO
+	release_i2c_switch(KASLI_I2C_MUX_SFP_ADDR);
+	if(enable_i2c_switch_port(KASLI_I2C_MUX_SFP_ADDR, 3) < 0)
+		return -1;
+
+	// GPA
+	// MSB to LSB:
+	// 	- 7: VUSB_PRESENT(1)
+	//  - 6: SFP0_LED(0)
+	//  - 5: SFP0_LOS(1)
+	//  - 4: SFP0_MOD_PRESENT(1)
+	// 	- 3: SFP0_RATE_SELECT(0)
+	// 	- 2: SFP0_RATE_SELECT1(0)
+	//  - 1: SFP0_TXDISABLE(0)	- needs to be actively driven LOW
+	// 	- 0: SFP0_TX_FAULT(1)
+
+	// GPB
+	// MSB to LSB:
+	// 	- 7: CLK_SEL(0)
+	//  - 6: SFP1_LED(0)	- might as well drive it
+	//  - 5: SFP1_LOS(1)
+	//  - 4: SFP1_MOD_PRESENT(1)
+	// 	- 3: SFP1_RATE_SELECT(0)
+	// 	- 2: SFP1_RATE_SELECT1(0)
+	//  - 1: SFP1_TXDISABLE(0)	- migh as well...
+	// 	- 0: SFP1_TX_FAULT(1)
+
+	uint8_t port_config_a = 0b10110001;
+	uint8_t io_value_a = 0b01000000; // SPF0 LED ON, TXDISABLE LOW
+
+	uint8_t port_config_b = 0b00110001;
+	uint8_t io_value_b = 0b11000000;	// CLK_SEL HIGH, SFP1 LED ON, TXDISABLE LOW
+
+	uint8_t port_cfgs[2] = {port_config_a, port_config_b};
+	uint8_t io_vals[2] = {io_value_a, io_value_b};
+
+	uint8_t iodir[2] = {0x00, 0x06};	// [base_addr_MCP, base_addr_PCA]
+	uint8_t olat[2] = {0x14, 0x02};		// [base_addr_MCP, base_addr_PCA]
+
+	uint8_t ic_addr[2] = {0x20, 0x74};	// [addr_MCP, addr_PCA]
+
+	int ret = -1;
+	if (variant < 0 || variant > 1)
+	{
+		board_dbg("Kasli: supported GPIO assembly variants are only 0 and 1, not: %d\n", variant);
+		return ret;
+	}
+
+	// 
+	for (uint8_t i=0; i<2; i++){
+		ret = kasli_i2c_write(ic_addr[variant], iodir[variant] + i, port_cfgs[i]);
+		if (ret < 0)
+			board_dbg("Kasli: could not write to I/O expander config register\n");
+		ret |= kasli_i2c_write(ic_addr[variant], olat[variant] + i, io_vals[i]);
+	}
+	release_i2c_switch(KASLI_I2C_MUX_SFP_ADDR);
+	return ret;
+}
+
+
+int wrc_board_early_init(void)
+{
+	generic_board_storage_init();
+	int gpio_variant = detect_expander();
+	if (gpio_variant < 0)
+		return 0;	/* no expander */
+	configure_gpio_expander(gpio_variant);
+	setup_i2c_switches();
 
 	return 0;
 }
