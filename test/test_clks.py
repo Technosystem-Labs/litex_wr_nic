@@ -16,10 +16,10 @@ from litex import RemoteClient
 NUM_CLOCKS = 5
 CLOCK_MAPPING = {
     0: "Sys Clk",
-    1: "DMTD Clk",
-    2: "Clk Ref",
-    3: "Clk10m In",
-    4: "Clk62m5 In",
+    1: "DMTD sys Clk (62.5)",
+    2: "clk 62m5_dmtd",
+    3: "clk 125 gtp",
+    4: "refclk_eth"
 }
 
 # Functions ----------------------------------------------------------------------------------------
@@ -76,3 +76,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # from litex import RemoteClient
+    # b = RemoteClient(csr_csv="test/csr.csv"); b.open()
+    # print("ident bytes:")                                                                                                                                                                                                                                                                   
+    # for off in range(0x800, 0x830, 4):                                                                                                                                                                                                                                                      
+    #     w = b.read(off)                                                                                                                                                                                                                                                                     
+    #     print(f"  0x{off:04x} = 0x{w:08x}  {bytes([(w>>s)&0xff for s in (24,16,8,0)])}")                                                                                                                                                                                                    
+    # print("scratch round-trip:")                                                                                                                                                                                                                                                            
+    # b.regs.ctrl_scratch.write(0xdeadbeef)                                                                                                                                                                                                                                                   
+    # print(f"  ctrl_scratch = 0x{b.regs.ctrl_scratch.read():08x} (expect 0xdeadbeef)")                                                                                                                                                                                                       
+    # b.close()             

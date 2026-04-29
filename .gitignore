@@ -1,1 +1,6 @@
 litex_wr_nic/firmware/wrpc-sw
+
+__pycache__/
+build/
+.vscode/
+.venv/

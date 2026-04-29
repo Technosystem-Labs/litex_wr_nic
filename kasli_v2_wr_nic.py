@@ -52,6 +52,11 @@ _kasli_v2_wr_extensions = [
         Subsignal("wp",   Pins("P21")),
         Subsignal("hold", Pins("R21")),
         IOStandard("LVCMOS25")),
+
+    ("uart_bone", 0,
+        Subsignal("tx", Pins("eem0:d0_cc_n")),
+        Subsignal("rx", Pins("eem0:d0_cc_p")),
+        IOStandard("LVCMOS25")),
 ]
 
 # CRG ----------------------------------------------------------------------------------------------
@@ -95,6 +100,9 @@ class _CRG(LiteXModule):
 
         # WR GTP reference clock: CDR-cleaned Main Si549 output (F6/E6, 125MHz).
         # This clock is disciplined to the WR master by the SoftPLL + Main Si549.
+        # This clock is absent # at power-up, which is fine with PLL setup 3 
+        # because the WRPC CPU runs  on cd_clk_62m5_sys (free-XO derived) 
+        # and programs the Si549 over I2C before anything downstream of the GTP is needed.
         cdr_clk_clean = platform.request("cdr_clk_clean")
         platform.add_period_constraint(cdr_clk_clean.p, 1e9/125e6)
 
@@ -105,16 +113,13 @@ class _CRG(LiteXModule):
             i_IB  = cdr_clk_clean.n,
             o_O   = cdr_clk_se,
         )
-        # GTP reference = disciplined Main Si549 (F6/E6). This clock is absent
-        # at power-up, which is fine with PLL setup 3 because the WRPC CPU runs
-        # on cd_clk_62m5_sys (free-XO derived) and programs the Si549 over I2C
-        # before anything downstream of the GTP is needed.
         self.comb += [
             self.cd_clk_125m_gtp.clk.eq(cdr_clk_se),
             self.cd_refclk_eth.clk.eq(cdr_clk_se),
         ]
 
         # DDMTD helper clock: direct output of Helper Si549 (W19/W20, ~62.5MHz).
+        # - initially it's 125 MHz 
         helper_clk_pads = platform.request("ddmtd_helper_clk")
         self.specials += Instance("IBUFGDS",
             p_DIFF_TERM   = "TRUE",
@@ -123,7 +128,7 @@ class _CRG(LiteXModule):
             i_IB = helper_clk_pads.n,
             o_O  = self.cd_clk_62m5_dmtd.clk,
         )
-        platform.add_period_constraint(helper_clk_pads.p, 1e9/62.5e6)
+        platform.add_period_constraint(helper_clk_pads.p, 1e9/125e6)
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
@@ -170,20 +175,21 @@ class BaseSoC(LiteXWRNICSoC):
             ident_version = True,
         )
 
-        # UART -------------------------------------------------------------------------------------
-        # UARTShared multiplexes the physical serial port between WRPC and LiteX.
-        # Auto-mode selects based on last RX activity.
-        # LiteX crossover UART is accessible via JTAGBone (litex_term crossover).
+        # # UART -------------------------------------------------------------------------------------
+        # # UARTShared multiplexes the physical serial port between WRPC and LiteX.
+        # # Auto-mode selects based on last RX activity.
+        # # LiteX crossover UART is accessible via JTAGBone (litex_term crossover).
 
-        self.uart = UARTShared(pads=platform.request("serial"), sys_clk_freq=sys_clk_freq)
+        # self.uart = UARTShared(pads=platform.request("serial"), sys_clk_freq=sys_clk_freq)
 
-        # JTAGBone ---------------------------------------------------------------------------------
+        # # JTAGBone ---------------------------------------------------------------------------------
 
-        self.add_jtagbone()
-        platform.add_period_constraint(self.jtagbone_phy.cd_jtag.clk, 1e9/20e6)
-        platform.add_false_path_constraints(self.jtagbone_phy.cd_jtag.clk, self.crg.cd_sys.clk)
+        # self.add_jtagbone()
+        # platform.add_period_constraint(self.jtagbone_phy.cd_jtag.clk, 1e9/20e6)
+        # platform.add_false_path_constraints(self.jtagbone_phy.cd_jtag.clk, self.crg.cd_sys.clk)
 
         # White Rabbit -----------------------------------------------------------------------------
+        self.add_uartbone(uart_name="uart_bone")
 
         if with_white_rabbit:
             # White Rabbit Core.
@@ -210,7 +216,7 @@ class BaseSoC(LiteXWRNICSoC):
                 with_ext_clk     = False,  # No 10MHz external reference on Kasli WR NIC
 
                 # Serial.
-                serial_pads      = self.uart.shared_pads,
+                serial_pads      = platform.request("serial"),
 
                 # Flash.
                 flash_pads       = platform.request("flash", 0),
@@ -286,13 +292,24 @@ class BaseSoC(LiteXWRNICSoC):
 
         self.clk_measurement = MultiClkMeasurement(clks={
             "clk0" : ClockSignal("sys"),
-            "clk1" : ClockSignal("clk_62m5_dmtd"),
-            "clk2" : ClockSignal("clk_125m_gtp"),
+            "clk1":  ClockSignal("clk_62m5_sys"),
+            "clk2" : ClockSignal("clk_62m5_dmtd"),
+            "clk3":  ClockSignal("clk_125m_gtp"),
+            "clk4" : ClockSignal("refclk_eth"),
         })
         # To overcome spi x2
         platform.toolchain.bitstream_commands.append(                                                                                                                                                                                                                                           
             "set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 1 [current_design]"
         )   
+
+        # Debug/diagnostics CSRs
+        self._storage_val = CSRStorage(2)
+        self._status_val = CSRStatus(4, reset=0b0110)
+        self._const_id = CSRStatus(16)
+        self._const_val = CSRConstant(0xABCD)
+
+        self.comb += self._const_id.status.eq(self._const_val.constant)
+
 # Build --------------------------------------------------------------------------------------------
 
 def main():
@@ -345,7 +362,7 @@ def main():
     # Load FPGA.
     if args.load:
         prog = soc.platform.create_programmer()
-        prog.load_bitstream(builder.get_bitstream_filename(mode="flash"))
+        prog.load_bitstream(builder.get_bitstream_filename(mode="sram"))
 
     # Flash FPGA.
     if args.flash:
