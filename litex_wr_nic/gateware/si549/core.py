@@ -259,7 +259,7 @@ class Si549DAC(LiteXModule):
         # CSR: I2C configuration.
         self._i2c_divider = CSRStorage(16, reset=int(sys_clk_freq / (4 * 400e3)),
             description="I2C clock divider. I2C freq = sys_clk / (4 * (divider+1)).")
-        self._i2c_address = CSRStorage(7, reset=0x55,
+        self._i2c_address = CSRStorage(7, reset=0x67,
             description="Si549 I2C address (7-bit, without R/W bit).")
 
         # CSR: ADPLL scale factor.
@@ -277,6 +277,14 @@ class Si549DAC(LiteXModule):
         # CSR: Status.
         self._busy  = CSRStatus(description="1 while an I2C transaction is in progress.")
         self._nack  = CSRStatus(description="1 if the last transaction received a NACK.")
+
+        # CSR: Bit-bang mode (host-driven I2C for one-time setup).
+        self._bitbang_enable = CSRStorage(description="1: host bit-bang owns SDA/SCL; 0: ADPLL programmer.")
+        self._sda_oe         = CSRStorage()
+        self._sda_out        = CSRStorage()
+        self._sda_in         = CSRStatus()
+        self._scl_oe         = CSRStorage()
+        self._scl_out        = CSRStorage()
 
         # # #
 
@@ -327,17 +335,25 @@ class Si549DAC(LiteXModule):
         ]
 
         # I2C tristate I/O.
-        scl_t = TSTriple(1)
-        sda_t = TSTriple(1)
+        self.scl_t = scl_t = TSTriple(1)
+        self.sda_t = sda_t = TSTriple(1)
         self.specials += [
             scl_t.get_tristate(pads.scl),
             sda_t.get_tristate(pads.sda),
         ]
 
         self.comb += [
-            scl_t.oe.eq(~programmer.scl),
-            scl_t.o.eq(0),
-            sda_t.oe.eq(~programmer.sda_o),
-            sda_t.o.eq(0),
             programmer.sda_i.eq(sda_t.i),
+            self._sda_in.status.eq(sda_t.i),
+            If(self._bitbang_enable.storage,
+                scl_t.oe.eq(self._scl_oe.storage),
+                scl_t.o.eq(self._scl_out.storage),
+                sda_t.oe.eq(self._sda_oe.storage),
+                sda_t.o.eq(self._sda_out.storage),
+            ).Else(
+                scl_t.oe.eq(~programmer.scl),
+                scl_t.o.eq(0),
+                sda_t.oe.eq(~programmer.sda_o),
+                sda_t.o.eq(0),
+            ),
         ]

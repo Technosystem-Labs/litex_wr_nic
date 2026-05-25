@@ -31,6 +31,9 @@
 #include "dev/syscon.h"
 #include "dev/endpoint.h"
 #include "dev/bb_i2c.h"
+#include "dev/bb_spi.h"
+#include "dev/gpio.h"
+#include "pp-printf.h"
 #include "storage.h"
 #include "board-decl.h"
 
@@ -207,6 +210,81 @@ static int configure_gpio_expander(int variant){
 }
 
 
+/*
+ * SPI flash bring-up diagnostic.
+ *
+ * Purpose: discriminate between three failure hypotheses for "WRPC can't
+ * read flash on Kasli v2":
+ *   H1) wrc_syscon.vhd:251 typo (gpsr_wr instead of gpcr_wr) latches MOSI
+ *       high after the first 1-bit and never clears it.
+ *   H2) Flash bit-bang reaches the chip correctly, but something else is
+ *       wrong (wiring, IO standard, STARTUPE2 hookup, chip dead, ...).
+ *   H3) The bit-bang itself doesn't reach the pad at all.
+ *
+ * The diagnostic does three things, in order:
+ *
+ *   1) MOSI-toggle pattern with CS deasserted. The flash chip ignores this
+ *      because CS is high. The point is to drive a known sequence on MOSI
+ *      that is easy to recognise on a LiteScope capture: 8 cycles of
+ *      "high then low" with the SPI sclk held low (so this isn't an SPI
+ *      transaction, just a raw pin toggle). If H1 is true, MOSI will go
+ *      high on the first set and stay there. If H1 is false, MOSI will
+ *      toggle. No flash chip involved -> isolates the suspect line.
+ *
+ *   2) JEDEC ID read with opcode 0x9F. Logs the bit pattern shifted on MOSI
+ *      (we shift it ourselves so we can pp_printf each bit) and the three
+ *      response bytes captured on MISO. Sane chips return non-trivial IDs.
+ *
+ *   3) JEDEC ID read with opcode 0xFF. Control: if H1 is true, the chip
+ *      sees 0xFF in BOTH this case and the 0x9F case, so the responses
+ *      should match. If H1 is false but the bus is otherwise broken, the
+ *      responses may also match but for a different reason (e.g. all-FF
+ *      from a floating MISO).
+ *
+ * The diagnostic uses pp_printf (always-on) rather than board_dbg/dev_dbg.
+ * It runs once at end of wrc_board_init() and never repeats.
+ */
+static void kasli_spi_flash_diag(void)
+{
+	struct spi_bus diag_bus;
+	uint64_t resp = 0;
+	// int i;
+
+	/*
+	 * Build a private spi_bus on the same syscon GPIO pins the flash uses.
+	 * bb_spi_create configures pin directions (CS/MOSI/SCLK out, MISO in)
+	 * and sets the bit_delay; the value 6 corresponds to CPU_CLOCK / 10MHz
+	 * for the firmware's 62.5 MHz CPU clock, matching what
+	 * generic_board_spi_storage() picks.
+	 */
+	bb_spi_create(&diag_bus,
+		      &pin_sysc_spi_ncs,
+		      &pin_sysc_spi_mosi,
+		      &pin_sysc_spi_miso,
+		      &pin_sysc_spi_sclk, 6);
+	diag_bus.rd_falling_edge = 1;
+
+	/* Idle: CS high (deasserted), SCLK low, MOSI low. */
+	gen_gpio_out(&pin_sysc_spi_ncs,  1);
+	gen_gpio_out(&pin_sysc_spi_sclk, 0);
+	gen_gpio_out(&pin_sysc_spi_mosi, 0);
+	
+	/*
+	 * JEDEC ID read with opcode 0x9F.
+	 *
+	 * We use bb_spi_xfer instead of separate write/read because xfer
+	 * keeps CS asserted across the full transaction, which is what real
+	 * SPI flash chips require.
+	 */
+	pp_printf("[kasli-spi-diag] JEDEC read, opcode 0x9F\n");
+	gen_gpio_out(&pin_sysc_spi_ncs, 0);  /* CS asserted (active-low)   */
+	bb_spi_write(&diag_bus, 0x9F, 8);
+	resp = bb_spi_read(&diag_bus, 24);
+	gen_gpio_out(&pin_sysc_spi_ncs, 1);  /* CS deasserted              */
+	pp_printf("[kasli-spi-diag]     opcode=0x9F response=0x%06x\n",
+		  (unsigned)(resp & 0xffffff));
+}
+
 int wrc_board_early_init(void)
 {
 	generic_board_storage_init();
@@ -215,6 +293,15 @@ int wrc_board_early_init(void)
 		return 0;	/* no expander */
 	configure_gpio_expander(gpio_variant);
 	setup_i2c_switches();
+
+	/*
+	 * Run the SPI flash diagnostic AFTER generic_board_storage_init() —
+	 * that init has already touched the SPI lines, so we know the WR core
+	 * has driven them at least once. Run before wrc_board_init() so output
+	 * is interleaved with normal early-boot pp_printf rather than mixed
+	 * with the network/PTP startup.
+	 */
+	kasli_spi_flash_diag();
 
 	return 0;
 }

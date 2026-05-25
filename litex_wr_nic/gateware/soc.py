@@ -121,6 +121,11 @@ class LiteXWRNICSoC(SoCMini):
         use_default_plls = True,
         sys_locked       = None,   # used only when use_default_plls=False
         dmtd_locked      = None,   # used only when use_default_plls=False
+
+        # below are default values from WRPC
+        flash_sdbfs_baddr = 0x0060_0000,
+        flash_secsz_kb = 256,
+
     ):
 
         # Clks.
@@ -180,8 +185,14 @@ class LiteXWRNICSoC(SoCMini):
 
         # Flash Logic.
         # ------------
+        # Save the pads/clk signal on self so that add_spi_flash_probe() can
+        # see them after add_wr_core() returns. Default to None so the probe
+        # method can detect a board with no flash and fail gracefully.
+        self.flash_pads = flash_pads
+        self.flash_clk  = None
         if flash_pads is not None:
             flash_clk = Signal()
+            self.flash_clk = flash_clk
             self.specials += Instance("STARTUPE2",
                 i_CLK       = 0,
                 i_GSR       = 0,
@@ -225,6 +236,9 @@ class LiteXWRNICSoC(SoCMini):
             p_g_fpga_family               = {True: "artix7", False: "kintex7"}[self.platform.device.startswith("xc7a")],
             p_g_board_name                = board_name,
             p_g_dac_bits                  = dac_bits,
+            p_g_flash_sdbfs_baddr         = flash_sdbfs_baddr,
+            p_g_flash_secsz_kb            = flash_secsz_kb,
+
             **custom_pll_params,
 
             # Clocks/resets.

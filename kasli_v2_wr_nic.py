@@ -32,8 +32,33 @@ from litex_wr_nic.gateware.qpll    import SharedQPLL
 from litex_wr_nic.gateware.measurement import MultiClkMeasurement
 from litex_wr_nic.gateware.nic.phy import LiteEthPHYWRGMII
 from litex_wr_nic.gateware.si549.core import Si549DAC
+from litescope import LiteScopeAnalyzer
 
 # Platform extensions ------------------------------------------------------------------------------
+
+def _eem_signal(i):
+    n = "d{}".format(i)
+    if i == 0:
+        n += "_cc"
+    return n
+
+
+def _eem_pin(eem, i, pol):
+    return "eem{}:{}_{}".format(eem, _eem_signal(i), pol)
+
+
+def default_iostandard(eem):
+    return IOStandard("LVDS_25")
+
+
+def dio(eem, iostandard=default_iostandard):
+    return [("dio{}".format(eem), i,
+        Subsignal("p", Pins(_eem_pin(eem, i, "p"))),
+        Subsignal("n", Pins(_eem_pin(eem, i, "n"))),
+        iostandard(eem))
+        for i in range(8)]
+
+
 
 _kasli_v2_wr_extensions = [
     # Board I2C bus — used by WRPC as the SFP I2C bus.
@@ -58,6 +83,7 @@ _kasli_v2_wr_extensions = [
         Subsignal("rx", Pins("eem0:d0_cc_p")),
         IOStandard("LVCMOS25")),
 ]
+
 
 # CRG ----------------------------------------------------------------------------------------------
 
@@ -138,11 +164,14 @@ class BaseSoC(LiteXWRNICSoC):
         with_white_rabbit         = True,
         white_rabbit_sfp_connector = 0,
         white_rabbit_cpu_firmware  = "litex_wr_nic/firmware/kasli_v2_wrc.bram",
+        flash_sdbfs_baddr = 0x0060_0000,
+        dio_eem_n: int = 1
     ):
         # Platform ---------------------------------------------------------------------------------
 
         platform      = sinara_kasli.Platform(hw_rev="v2.0")
         platform.add_extension(_kasli_v2_wr_extensions)
+        platform.add_extension(dio(dio_eem_n))      # EEM1
         platform.name = "kasli_v2_wr_nic"
 
         # Clocking ---------------------------------------------------------------------------------
@@ -192,6 +221,9 @@ class BaseSoC(LiteXWRNICSoC):
         self.add_uartbone(uart_name="uart_bone")
 
         if with_white_rabbit:
+            # Kasli uses flash with 64 kB sectors
+            self.flash_sdbfs_baddr = flash_sdbfs_baddr
+            # self.flash_secsz_kb = 64
             # White Rabbit Core.
             # ------------------
             self.add_wr_core(
@@ -231,6 +263,8 @@ class BaseSoC(LiteXWRNICSoC):
                 use_default_plls = False,
                 sys_locked       = self.crg.pll.locked,
                 dmtd_locked      = 1,  # Helper Si549 has no lock output
+                flash_sdbfs_baddr = self.flash_sdbfs_baddr,
+                # flash_secsz_kb = self.flash_secsz_kb,
             )
             self.add_sources()
 
@@ -256,6 +290,38 @@ class BaseSoC(LiteXWRNICSoC):
                 sys_clk_freq  = sys_clk_freq,
             )
 
+            analyzer_signals = [
+                # Refclk signals
+                self.refclk_dac.scl_t.oe,
+                self.refclk_dac.scl_t.o,
+
+                self.refclk_dac.sda_t.o,
+                self.refclk_dac.sda_t.oe,
+                self.refclk_dac.sda_t.i,
+
+                self.dac_refclk_load,
+                self.dac_refclk_data,
+
+                # DMTD signals
+                self.dmtd_dac.scl_t.oe,
+                self.dmtd_dac.scl_t.o,
+
+                self.dmtd_dac.sda_t.o,
+                self.dmtd_dac.sda_t.oe,
+                self.dmtd_dac.sda_t.i,
+
+                self.dac_dmtd_load,
+                self.dac_dmtd_data,
+            ]
+
+            self.analyzer = LiteScopeAnalyzer(analyzer_signals,
+                depth        = 4096,
+                clock_domain = "wr",
+                samplerate   = int(62.5e6),
+                register     = True,
+                csr_csv      = "test/analyzer.csv",
+            )
+
             # Timing Constraints.
             # -------------------
             platform.add_platform_command("create_clock -name wr_txoutclk -period 16.000 [get_pins -hierarchical *gtpe2_i/TXOUTCLK]")
@@ -271,10 +337,17 @@ class BaseSoC(LiteXWRNICSoC):
             # Leds.
             # -----
             self.comb += [
-                platform.request("user_led", 0).eq(~self.led_link),
-                platform.request("user_led", 1).eq(~self.led_act),
-                platform.request("user_led", 2).eq(~self.led_pps),
+                platform.request("user_led", 0).eq(self.led_link),
+                platform.request("user_led", 1).eq(self.led_act),
+                platform.request("user_led", 2).eq(self.led_pps),
             ]
+
+            for i in range(8):
+                pads = platform.request(f"dio{dio_eem_n}", i)
+                self.specials += Instance("OBUFDS",
+                    i_I=self.pps_out,
+                    o_O=pads.p, o_OB=pads.n
+                )
 
         # Timing Constraints -----------------------------------------------------------------------
 
@@ -310,6 +383,43 @@ class BaseSoC(LiteXWRNICSoC):
 
         self.comb += self._const_id.status.eq(self._const_val.constant)
 
+    # def add_spi_flash_probe(self):
+    #     # Probe the four flash pad nets driven out of the WR core's syscon:
+    #     #   spi_sclk_o -> flash_clk (then gated through STARTUPE2 to CCLK pad)
+    #     #   spi_ncs_o  -> flash_pads.cs_n
+    #     #   spi_mosi_o -> flash_pads.mosi
+    #     #   spi_miso_i <- flash_pads.miso (input from the flash chip)
+    #     #
+    #     # All four signals are driven (or sampled) in the WR core's clk_sys
+    #     # domain, which is exported on cd_wr. We sample at 62.5 MHz in cd_wr
+    #     # so the probe and the source share a clock — no CDC, no metastability
+    #     # concern.
+    #     #
+    #     # Triggering: LiteScope's default trigger configuration is set in
+    #     # software (test/spi_flash_probe.py). The intended trigger is the
+    #     # falling edge of cs_n -> capture the start of every SPI transaction.
+    #     # depth=4096 covers ~66 us at 62.5 MHz, which is roughly the first 8
+    #     # bit-banged bits at the firmware's CPU_CLOCK/10MHz delay setting.
+    #     # That is exactly what the suspected MOSI-clear bug would corrupt, so
+    #     # capturing the first 8 bits is sufficient evidence either way.
+    #     if self.flash_pads is None:
+    #         raise ValueError("add_spi_flash_probe() requires flash_pads to be wired in add_wr_core()")
+    #     analyzer_signals = [
+    #         self.flash_clk,
+    #         self.flash_pads.cs_n,
+    #         self.flash_pads.mosi,
+    #         self.flash_pads.miso,
+    #     ]
+    #     self.analyzer = LiteScopeAnalyzer(analyzer_signals,
+    #         depth        = 4096,
+    #         clock_domain = "wr",
+    #         samplerate   = int(62.5e6),
+    #         register     = True,
+    #         csr_csv      = "test/analyzer.csv",
+    #     )
+
+
+
 # Build --------------------------------------------------------------------------------------------
 
 def main():
@@ -328,6 +438,7 @@ def main():
     parser.add_argument("--with-wishbone-fabric-interface-probe", action="store_true")
     parser.add_argument("--with-wishbone-slave-probe",            action="store_true")
     parser.add_argument("--with-dac-vcxo-probe",                  action="store_true")
+    parser.add_argument("--no-compile-gateware", action="store_true", default=False)
 
     args = parser.parse_args()
 
@@ -349,7 +460,7 @@ def main():
     if args.with_dac_vcxo_probe:
         soc.add_dac_vcxo_probe()
 
-    builder = Builder(soc, csr_csv="test/csr.csv")
+    builder = Builder(soc, csr_csv="test/csr.csv", compile_gateware=args.no_compile_gateware)
     builder.build(run=args.build)
 
     # Generate Bitstream.
@@ -368,7 +479,17 @@ def main():
     if args.flash:
         prog = soc.platform.create_programmer()
         prog.flash(0x0000_0000, builder.get_bitstream_filename(mode="flash"))
-        prog.flash(0x002e_0000, "litex_wr_nic/firmware/sdb-wrpc.bin")
+
+        # According to Xilinx's UG470, 7A100T's bitstream is 30606304 bits long (and fixed)
+        # so around 3826 kB. With flash of 256 kB sectors, we got > 14 sectors
+        # Spec A7 was on smaller FPGA, with smaller bitstream.
+        # 4 MB should be enough: 0x0040_0000
+        # 
+        # However, LiteXNicWrapper at the moment does not allow for overriding of that
+        # default parameter, so default WRPC's value (the one syscon uses and 
+        # firmware) should be used instead: 0x0060_0000   
+        sdb_addr = soc.flash_sdbfs_baddr
+        prog.flash(sdb_addr, "litex_wr_nic/firmware/sdb-wrpc.bin")
 
 if __name__ == "__main__":
     main()

@@ -51,7 +51,9 @@ entity xwrc_board_litex_wr_nic_wrapper is
     -- GTPE2_CHANNEL RX Polarity Control Ports
     rxpolarity                  : bit := '1';
     -- Set to FALSE to instantiate custom PLLs (PLL setup 3).
-    g_use_default_plls          : boolean := TRUE
+    g_use_default_plls          : boolean := TRUE;
+    g_flash_sdbfs_baddr         : integer := 16#600000#;
+    g_flash_secsz_kb            : integer := 256
   );
   port (
     -- Clocks/resets
@@ -257,7 +259,10 @@ begin
       g_diag_rw_size              => g_diag_rw_size,
       txpolarity                  => txpolarity,
       rxpolarity                  => rxpolarity,
-      g_use_default_plls          => g_use_default_plls
+      g_use_default_plls          => g_use_default_plls,
+      g_flash_sdbfs_baddr         => g_flash_sdbfs_baddr,
+      g_flash_secsz_kb            => g_flash_secsz_kb
+
     )
     port map (
       areset_n_i           => areset_n_i,
