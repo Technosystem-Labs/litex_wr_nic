@@ -254,18 +254,63 @@ class ADPLLProgrammer(Module):
 # When a new load strobe arrives while I2C is busy, the new value is latched
 # and sent as soon as the current transaction completes (no queue, last wins).
 
+# Si549 ADPLL frequency step: each LSB of the 24-bit *signed* ADPLL register
+# (reg 231) shifts the output frequency by ~0.0001164 ppm (Si549 datasheet,
+# "frequency increment"). The full register range is therefore
+# +/- 2^23 * 0.0001164 = +/- ~976 ppm (the chip's absolute pull range).
+SI549_ADPLL_PPM_PER_LSB = 0.0001164
+
+def adpll_scale_for_ppm(target_ppm=100.0):
+    """Compute the Si549DAC `adpll_scale` for a desired +/- frequency pull range.
+
+    The gateware maps WRPC's 16-bit SoftPLL DAC word to the chip's 24-bit ADPLL
+    register:
+
+        adpll = (dac - 0x8000) * adpll_scale / 256
+
+    and the chip turns ADPLL LSBs into a frequency offset:
+
+        delta_f_ppm = adpll * SI549_ADPLL_PPM_PER_LSB
+
+    At the DAC extremes |dac - 0x8000| = 2^15 = 32768, so the reachable range is
+
+        +/- range_ppm = 32768 * (adpll_scale / 256) * SI549_ADPLL_PPM_PER_LSB
+                      = 128 * adpll_scale * SI549_ADPLL_PPM_PER_LSB
+
+    Inverting for the scale needed to reach a target range:
+
+        adpll_scale = target_ppm / (128 * SI549_ADPLL_PPM_PER_LSB)
+                    ~= target_ppm * 67.1
+
+    Worked values (all equivalent to within integer rounding):
+        +/-50  ppm -> 3356
+        +/-100 ppm -> 6711
+        +/-200 ppm -> 13422
+        +/-976 ppm -> 65535  (chip maximum; full 24-bit ADPLL)
+
+    """
+    scale = round(target_ppm / (128 * SI549_ADPLL_PPM_PER_LSB))
+    assert 0 < scale < (1 << 16), f"adpll_scale {scale} out of 16-bit range for {target_ppm} ppm"
+    return scale
+
 class Si549DAC(LiteXModule):
-    def __init__(self, pads, load, value, sys_clk_freq=62.5e6):
+    # fw_enable / fw_scl / fw_sda_oe (all optional): a third I2C owner driven by
+    # WRPC firmware over the WR-core aux Wishbone (see gateware/wb_gpio.py). When
+    # fw_enable is high the line drivers follow fw_scl (SCL push-pull) and
+    # fw_sda_oe (SDA open-drain, 1 = drive low). L
+    def __init__(self, pads, load, value, sys_clk_freq=62.5e6,
+                 fw_enable=None, fw_scl=None, fw_sda_oe=None):
         # CSR: I2C configuration.
         self._i2c_divider = CSRStorage(16, reset=int(sys_clk_freq / (4 * 400e3)),
             description="I2C clock divider. I2C freq = sys_clk / (4 * (divider+1)).")
         self._i2c_address = CSRStorage(7, reset=0x67,
             description="Si549 I2C address (7-bit, without R/W bit).")
 
-        # CSR: ADPLL scale factor.
-        self._adpll_scale = CSRStorage(16, reset=256,
+        # CSR: ADPLL scale factor. Default = the scale for +/-100 ppm of pull
+        # range (see adpll_scale_for_ppm() above for the full derivation).
+        self._adpll_scale = CSRStorage(16, reset=adpll_scale_for_ppm(100.0),
             description="ADPLL scale: adpll = (dac - 0x8000) * scale >> 8. "
-                         "Default 256 = 1:1 mapping.")
+                         "Sets the SoftPLL pull range; reset = adpll_scale_for_ppm(100 ppm).")
 
         # CSR: Force/override mode (bypass WRPC DAC interface).
         self._force       = CSRStorage(
@@ -342,14 +387,26 @@ class Si549DAC(LiteXModule):
             sda_t.get_tristate(pads.sda),
         ]
 
+        # firmware-driven bit-bang owner (over the aux Wishbone). When
+        # unused, fold to constant 0 so the .Elif branch is dead and the mux
+        # reduces to the original CSR-bitbang / programmer two-way select.
+        if fw_enable is None:
+            fw_enable, fw_scl, fw_sda_oe = C(0), C(0), C(0)
+
         self.comb += [
             programmer.sda_i.eq(sda_t.i),
             self._sda_in.status.eq(sda_t.i),
+            # Priority: host CSR bit-bang > firmware bit-bang > ADPLL programmer.
             If(self._bitbang_enable.storage,
                 scl_t.oe.eq(self._scl_oe.storage),
                 scl_t.o.eq(self._scl_out.storage),
                 sda_t.oe.eq(self._sda_oe.storage),
                 sda_t.o.eq(self._sda_out.storage),
+            ).Elif(fw_enable,
+                scl_t.oe.eq(1),          # SCL push-pull (matches host/test-script electrical path)
+                scl_t.o.eq(fw_scl),
+                sda_t.oe.eq(fw_sda_oe),  # SDA open-drain: 1 = drive low, 0 = release
+                sda_t.o.eq(0),
             ).Else(
                 scl_t.oe.eq(~programmer.scl),
                 scl_t.o.eq(0),

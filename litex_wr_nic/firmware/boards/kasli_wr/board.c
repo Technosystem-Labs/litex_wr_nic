@@ -36,6 +36,7 @@
 #include "pp-printf.h"
 #include "storage.h"
 #include "board-decl.h"
+#include "si549.h"
 
 /* I2C addresses of the PCA9548 switches on the Kasli v2.0 board I2C bus */
 #define KASLI_I2C_MUX_TOP_ADDR 0x70  /* Top-level mux: disable all channels */
@@ -287,6 +288,14 @@ static void kasli_spi_flash_diag(void)
 
 int wrc_board_early_init(void)
 {
+	/*
+	 * Program both Si549 DCXOs to their target frequencies first, before the
+	 * SoftPLL / PHY come up. Runs over the aux-WB GPIO; independent of the SFP
+	 * expander below, so do it unconditionally (and before the early return
+	 * for "no expander").
+	 */
+	kasli_si549_init();
+
 	generic_board_storage_init();
 	int gpio_variant = detect_expander();
 	if (gpio_variant < 0)

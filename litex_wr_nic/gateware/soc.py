@@ -30,7 +30,7 @@ from litex_wr_nic.gateware.nic import sram
 sys.modules["liteeth.mac.sram"] = sram #  Replace Liteeth SRAM with our custom implementation.
 from litex_wr_nic.gateware.nic.dma import LitePCIe2WishboneDMA
 
-from litex_wr_nic.gateware.wr_common         import wr_core_init, wr_core_files, patch_wr_subsystem_mux_class
+from litex_wr_nic.gateware.wr_common         import wr_core_init, wr_core_files, patch_wr_subsystem_mux_class, patch_wr_syscon
 from litex_wr_nic.gateware.wrf_stream2wb     import Stream2Wishbone
 from litex_wr_nic.gateware.wrf_wb2stream     import Wishbone2Stream
 from litex_wr_nic.gateware.wb_clock_crossing import WishboneClockCrossing
@@ -170,6 +170,14 @@ class LiteXWRNICSoC(SoCMini):
             wb_to   = wb_slave_wr,
             cd_to   = "wr",
         )
+
+        # White Rabbit Aux Master Interface (periph3 / c_wrc_periph3_sdb slot).
+        # ---------------------------------------------------------------------
+        # The WR core (urv CPU) is the master here; firmware reaches this window
+        # at BASE_AUXWB (= DEV_BASE + 0x8000). It runs in the WR-core clk_sys =
+        # "wr" clock domain. Exposed so the target can attach a slave (the Si549
+        # firmware bit-bang GPIO). Byte-addressed to match the VHDL aux adr.
+        self.aux_wb = wishbone.Interface(data_width=32, address_width=32, addressing="byte")
 
         # Temp 1-Wire Logic.
         # ------------------
@@ -311,6 +319,18 @@ class LiteXWRNICSoC(SoCMini):
             o_wb_slave_err        = wb_slave_wr.err,
             o_wb_slave_rty        = Open(),
             o_wb_slave_stall      = Open(),
+
+            # Wishbone Aux Master Interface (periph3, firmware-reachable).
+            o_aux_master_adr_o    = self.aux_wb.adr,
+            o_aux_master_dat_o    = self.aux_wb.dat_w,
+            o_aux_master_sel_o    = self.aux_wb.sel,
+            o_aux_master_cyc_o    = self.aux_wb.cyc,
+            o_aux_master_stb_o    = self.aux_wb.stb,
+            o_aux_master_we_o     = self.aux_wb.we,
+            i_aux_master_dat_i    = self.aux_wb.dat_r,
+            i_aux_master_ack_i    = self.aux_wb.ack,
+            i_aux_master_stall_i  = 0,  # classic Wishbone slave: never stalls.
+            i_aux_master_err_i    = self.aux_wb.err,
 
             # Wishbone Fabric Source Interface.
             o_wrf_src_adr         = wrf_wb2stream.bus.adr,
@@ -530,6 +550,7 @@ class LiteXWRNICSoC(SoCMini):
         if not os.path.exists("wr-cores"):
             wr_core_init()
         patch_wr_subsystem_mux_class()
+        patch_wr_syscon()
         for file in wr_core_files:
             self.platform.add_source(file)
 

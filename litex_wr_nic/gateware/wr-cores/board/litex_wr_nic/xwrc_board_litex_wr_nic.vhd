@@ -170,6 +170,13 @@ entity xwrc_board_litex_wr_nic is
     wb_slave_i           : in  t_wishbone_slave_in  := cc_dummy_slave_in;
     wb_slave_o           : out t_wishbone_slave_out;
 
+    ---------------------------------------------------------------------------
+    -- Aux WB master (periph3 / c_wrc_periph3_sdb slot) exposed to LiteX.
+    -- The WR core (urv CPU) is the master; attach a LiteX Wishbone slave.
+    ---------------------------------------------------------------------------
+    aux_master_o         : out t_wishbone_master_out;
+    aux_master_i         : in  t_wishbone_master_in := cc_dummy_master_in;
+
     -- ---------------------------------------------------------------------------
     -- WR fabric interface (when g_fabric_iface = "plainfbrc")
     ---------------------------------------------------------------------------
@@ -496,6 +503,8 @@ begin  -- architecture struct
 
       wb_slave_i           => wb_slave_i,
       wb_slave_o           => wb_slave_o,
+      aux_master_o         => aux_master_o,
+      aux_master_i         => aux_master_i,
       aux_diag_i           => aux_diag_i,
       aux_diag_o           => aux_diag_o,
       tm_dac_value_o       => tm_dac_value_o,

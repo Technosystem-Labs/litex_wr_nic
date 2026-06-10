@@ -16,6 +16,7 @@ WR_CORES_URL    = "https://gitlab.com/ohwr/project/wr-cores.git"
 WR_CORES_BRANCH = "master"
 WR_CORES_SHA1   = "c3f828881f5fd496966f1f04723dc85992d526fa"
 WR_SUBSYSTEM_VHD = "wr-cores/modules/wrc_core/xwr_subsystem.vhd"
+WR_SYSCON_VHD = "wr-cores/modules/wrc_core/wrc_syscon.vhd"
 
 def wr_core_init():
     print("Cloning wr-cores repository...")
@@ -36,6 +37,14 @@ def patch_wr_subsystem_mux_class():
         WR_SUBSYSTEM_VHD,
         'mux_class_i(1) => x"f0");',
         'mux_class_i(1) => x"ff");'
+    )
+
+def patch_wr_syscon():
+    # This is needed so the flash controller actually works on Kasli
+    tools.replace_in_file(
+        WR_SYSCON_VHD,
+        "        elsif sysc_regs_o.gpsr_wr = '1' and sysc_regs_o.gpcr_spi_mosi = '1' then",
+        "        elsif sysc_regs_o.gpcr_wr = '1' and sysc_regs_o.gpcr_spi_mosi = '1' then"
     )
 
 # WR Core Files ------------------------------------------------------------------------------------

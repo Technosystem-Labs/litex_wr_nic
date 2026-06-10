@@ -92,11 +92,23 @@ def checkout_commit(target="spec_a7"):
         tools.replace_in_file(f"{CLONE_DIR}/softpll/spll_main.c", "s->pi.ki = -30;", "s->pi.ki = -2;")
 
     # For Kasli v2.0: overlay the generic board.c with the Kasli-specific
-    # version that initialises the PCA9548 I2C muxes for SFP0 access.
+    # version that initialises the PCA9548 I2C muxes for SFP0 access, plus the
+    # si549.c/.h that run the Si549 setup from firmware over the aux WB.
     if target == "kasli_v2":
-        board_overlay = os.path.join(os.path.dirname(__file__), "boards", "kasli_wr", "board.c")
-        board_dest    = os.path.join(CLONE_DIR, "boards", "generic", "board.c")
-        shutil.copy(board_overlay, board_dest)
+        src_dir = os.path.join(os.path.dirname(__file__), "boards", "kasli_wr")
+        dst_dir = os.path.join(CLONE_DIR, "boards", "generic")
+        for f in ("board.c", "si549.c", "si549.h"):
+            shutil.copy(os.path.join(src_dir, f), os.path.join(dst_dir, f))
+
+        # The generic-PHY target object list lives in boards/boards.mk; add the
+        # new si549 object so it gets compiled and linked (board.c overlays an
+        # existing object, but si549.o is new). Reset boards.mk to pristine
+        # first: `git checkout COMMIT_HASH` does not discard prior working-tree
+        # edits, so without this the append would stack up across rebuilds.
+        run_command("git checkout boards/boards.mk", cwd=CLONE_DIR)
+        tools.replace_in_file(f"{CLONE_DIR}/boards/boards.mk",
+            "obj-$(CONFIG_TARGET_GENERIC_PHY_16BIT) += boards/generic/board.o boards/generic/generic-storage.o",
+            "obj-$(CONFIG_TARGET_GENERIC_PHY_16BIT) += boards/generic/board.o boards/generic/generic-storage.o boards/generic/si549.o")
 
 def copy_config_file(config_src):
     """Copy the configuration file to the repository."""

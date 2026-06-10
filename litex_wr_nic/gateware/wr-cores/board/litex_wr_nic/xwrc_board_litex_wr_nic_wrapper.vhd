@@ -141,6 +141,18 @@ entity xwrc_board_litex_wr_nic_wrapper is
     wb_slave_rty         : out std_logic;
     wb_slave_stall       : out std_logic;
 
+    -- Aux WB master (periph3 slot, driven by WR core, reachable from urv firmware)
+    aux_master_adr_o     : out std_logic_vector(31 downto 0);
+    aux_master_dat_o     : out std_logic_vector(31 downto 0);
+    aux_master_sel_o     : out std_logic_vector(3 downto 0);
+    aux_master_cyc_o     : out std_logic;
+    aux_master_stb_o     : out std_logic;
+    aux_master_we_o      : out std_logic;
+    aux_master_dat_i     : in  std_logic_vector(31 downto 0) := (others => '0');
+    aux_master_ack_i     : in  std_logic := '0';
+    aux_master_stall_i   : in  std_logic := '0';
+    aux_master_err_i     : in  std_logic := '0';
+
     -- Generic diagnostics interface
     aux_diag_i           : in  t_generic_word_array(g_diag_ro_size-1 downto 0);
     aux_diag_o           : out t_generic_word_array(g_diag_rw_size-1 downto 0);
@@ -194,6 +206,9 @@ architecture wrapper of xwrc_board_litex_wr_nic_wrapper is
   signal wb_slave_i : t_wishbone_slave_in  := cc_dummy_slave_in;
   signal wb_slave_o : t_wishbone_slave_out;
 
+  signal aux_master_out : t_wishbone_master_out;
+  signal aux_master_in  : t_wishbone_master_in := cc_dummy_master_in;
+
 begin
 
   -- wrf_src Record -> Signals.
@@ -238,6 +253,21 @@ begin
   wb_slave_err    <= wb_slave_o.err;
   wb_slave_rty    <= wb_slave_o.rty;
   wb_slave_stall  <= wb_slave_o.stall;
+
+  -- aux_master Record -> Signals (WR core drives the bus).
+  aux_master_adr_o   <= aux_master_out.adr;
+  aux_master_dat_o   <= aux_master_out.dat;
+  aux_master_sel_o   <= aux_master_out.sel;
+  aux_master_cyc_o   <= aux_master_out.cyc;
+  aux_master_stb_o   <= aux_master_out.stb;
+  aux_master_we_o    <= aux_master_out.we;
+
+  -- aux_master Signals -> Record (LiteX slave responses).
+  aux_master_in.dat   <= aux_master_dat_i;
+  aux_master_in.ack   <= aux_master_ack_i;
+  aux_master_in.stall <= aux_master_stall_i;
+  aux_master_in.err   <= aux_master_err_i;
+  aux_master_in.rty   <= '0';
 
   -- xwrc_board_litex_wr_nic Instance.
   u_xwrc_board_litex_wr_nic : entity work.xwrc_board_litex_wr_nic
@@ -306,6 +336,8 @@ begin
 
       wb_slave_i           => wb_slave_i,
       wb_slave_o           => wb_slave_o,
+      aux_master_o         => aux_master_out,
+      aux_master_i         => aux_master_in,
       aux_diag_i           => aux_diag_i,
       aux_diag_o           => aux_diag_o,
       tm_dac_value_o       => tm_dac_value_o,

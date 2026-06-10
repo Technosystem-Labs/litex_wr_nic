@@ -32,6 +32,7 @@ from litex_wr_nic.gateware.qpll    import SharedQPLL
 from litex_wr_nic.gateware.measurement import MultiClkMeasurement
 from litex_wr_nic.gateware.nic.phy import LiteEthPHYWRGMII
 from litex_wr_nic.gateware.si549.core import Si549DAC
+from litex_wr_nic.gateware.wb_gpio     import WbGpio
 from litescope import LiteScopeAnalyzer
 
 # Platform extensions ------------------------------------------------------------------------------
@@ -268,6 +269,27 @@ class BaseSoC(LiteXWRNICSoC):
             )
             self.add_sources()
 
+            # Si549 firmware-init bit-bang GPIO (on the WR-core aux Wishbone).
+            # ----------------------------------------------------------------
+            # Lets WRPC firmware run the Si549 setup sequence over I2C at boot
+            # using the stock wb_gpio_create + bb_i2c drivers (reaches it at
+            # BASE_AUXWB). One bank, bit map:
+            #   0: main SCL      1: main SDA      4: main fw_enable
+            #   2: helper SCL    3: helper SDA    5: helper fw_enable
+            # SCL push-pull, SDA open-drain (oreg=1 -> release / line high). The
+            # CSR bit-bang path (test_si549_setup.py) is untouched and has
+            # priority over this firmware path inside Si549DAC.
+            self.si549_gpio = si549_gpio = ClockDomainsRenamer("wr")(WbGpio(nbits=8))
+            self.comb += self.aux_wb.connect(si549_gpio.bus)
+
+            o = si549_gpio.oreg
+            fw_scl_main      = o[0]
+            fw_sda_oe_main   = ~o[1]   # open-drain: oreg=1 -> release (oe=0), oreg=0 -> drive low (oe=1)
+            fw_en_main       = o[4]
+            fw_scl_helper    = o[2]
+            fw_sda_oe_helper = ~o[3]
+            fw_en_helper     = o[5]
+
             # Si549 DAC Bridges.
             # ------------------
             # RefClk DAC: translates WRPC SoftPLL DPLL output to ADPLL writes on
@@ -278,6 +300,9 @@ class BaseSoC(LiteXWRNICSoC):
                 load          = self.dac_refclk_load,
                 value         = self.dac_refclk_data,
                 sys_clk_freq  = sys_clk_freq,
+                fw_enable     = fw_en_main,
+                fw_scl        = fw_scl_main,
+                fw_sda_oe     = fw_sda_oe_main,
             )
 
             # DMTD DAC: translates WRPC SoftPLL HPLL output to ADPLL writes on
@@ -288,7 +313,16 @@ class BaseSoC(LiteXWRNICSoC):
                 load          = self.dac_dmtd_load,
                 value         = self.dac_dmtd_data,
                 sys_clk_freq  = sys_clk_freq,
+                fw_enable     = fw_en_helper,
+                fw_scl        = fw_scl_helper,
+                fw_sda_oe     = fw_sda_oe_helper,
             )
+
+            # Feed live SDA inputs back to the GPIO PSR (pin 1 = main, pin 3 = helper).
+            self.comb += [
+                si549_gpio.ireg[1].eq(self.refclk_dac.sda_t.i),
+                si549_gpio.ireg[3].eq(self.dmtd_dac.sda_t.i),
+            ]
 
             analyzer_signals = [
                 # Refclk signals
